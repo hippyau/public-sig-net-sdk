@@ -265,6 +265,7 @@ int32_t CalculateAndEncodeHMAC(
         HMAC_SHA256_LENGTH
     );
     
+    SecureZero(hmac_input, sizeof(hmac_input));
     return result;
 }
 

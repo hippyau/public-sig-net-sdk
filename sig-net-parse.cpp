@@ -719,15 +719,19 @@ int32_t VerifyPacketHMAC(
     }
     
     // Constant-time comparison to prevent timing attacks
-    uint8_t diff = 0;
-    for (int i = 0; i < HMAC_SHA256_LENGTH; i++) {
+    volatile uint8_t diff = 0; // volatile to prevent compiler optimizations skipping SecureZero
+    for (uint32_t i = 0; i < HMAC_SHA256_LENGTH; i++) {
         diff |= (computed_hmac[i] ^ options.hmac[i]);
     }
     
     if (diff != 0) {
+        SecureZero(hmac_input, sizeof(hmac_input));
+        SecureZero(computed_hmac, sizeof(computed_hmac));
         return SIGNET_ERROR_HMAC_FAILED;
     }
     
+    SecureZero(hmac_input, sizeof(hmac_input));
+    SecureZero(computed_hmac, sizeof(computed_hmac));
     return SIGNET_SUCCESS;
 }
 
