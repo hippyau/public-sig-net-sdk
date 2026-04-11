@@ -50,6 +50,14 @@
 namespace SigNet {
 namespace Crypto {
 
+inline bool CryptoRandom(uint8_t* p, size_t len) {
+#ifdef _WIN32
+    return BCryptGenRandom(NULL, p, (ULONG)len, BCRYPT_USE_SYSTEM_PREFERRED_RNG) == BCRYPT_SUCCESS;
+#else
+    return RAND_bytes(p, len) == 1;
+#endif
+}
+
 //------------------------------------------------------------------------------
 // HMAC-SHA256 Implementation using Windows BCrypt
 //------------------------------------------------------------------------------
@@ -212,7 +220,7 @@ int32_t DeriveManagerLocalKey(const uint8_t* k0, const uint8_t* tuid, uint8_t* m
     
     // Append TUID as 12-char hex string
     char tuid_hex[TUID_HEX_LENGTH + 1];
-    TUID_ToHexString(tuid, tuid_hex);
+    TUID_ToHexString(tuid, tuid_hex, sizeof(tuid_hex));
     tuid_hex[TUID_HEX_LENGTH] = '\0';
     strcat(info_str, tuid_hex);
     
@@ -226,14 +234,19 @@ int32_t DeriveManagerLocalKey(const uint8_t* k0, const uint8_t* tuid, uint8_t* m
 // Utility Functions
 //------------------------------------------------------------------------------
 
-void TUID_ToHexString(const uint8_t* tuid, char* hex_string) {
-    if (!tuid || !hex_string) {
+void TUID_ToHexString(const uint8_t* tuid, char* hex_string, size_t hex_string_size) {
+    static const char hex[] = "0123456789ABCDEF";
+
+    if (!tuid || !hex_string || hex_string_size < (TUID_HEX_LENGTH + 1)) {
         return;
     }
-    
+
     for (uint32_t i = 0; i < TUID_LENGTH; i++) {
-        sprintf(hex_string + (i * 2), "%02X", tuid[i]);
+        uint8_t v = tuid[i];
+        hex_string[i * 2]     = hex[v >> 4];
+        hex_string[i * 2 + 1] = hex[v & 0x0F];
     }
+
     hex_string[TUID_HEX_LENGTH] = '\0';
 }
 
@@ -264,16 +277,10 @@ int32_t TUID_GenerateEphemeral(uint16_t mfg_code, uint8_t* tuid_out) {
 
     // Generate 4 random bytes via CSPRNG
     uint8_t rand_bytes[4];
-#ifdef _WIN32
-    NTSTATUS status = BCryptGenRandom(NULL, rand_bytes, 4, BCRYPT_USE_SYSTEM_PREFERRED_RNG);
-    if (!BCRYPT_SUCCESS(status)) {
+
+    if (!CryptoRandom(rand_bytes, 4)) {
         return SIGNET_ERROR_CRYPTO;
     }
-#else
-    if (RAND_bytes(rand_bytes, 4) != 1) {
-        return SIGNET_ERROR_CRYPTO;
-    }
-#endif
 
     // Assemble as big-endian uint32_t
     uint32_t device_id = ((uint32_t)rand_bytes[0] << 24)
@@ -511,22 +518,10 @@ int32_t GenerateRandomPassphrase(char* passphrase_output, uint32_t buffer_size) 
     
     // Generate random bytes
     uint8_t random_bytes[PASSPHRASE_GENERATED_LENGTH];
-#ifdef _WIN32
-    NTSTATUS status = BCryptGenRandom(
-        NULL,
-        random_bytes,
-        PASSPHRASE_GENERATED_LENGTH,
-        BCRYPT_USE_SYSTEM_PREFERRED_RNG
-    );
-    
-    if (!BCRYPT_SUCCESS(status)) {
+
+    if (!CryptoRandom(random_bytes, PASSPHRASE_GENERATED_LENGTH)) {
         return SIGNET_ERROR_CRYPTO;
     }
-#else
-    if (RAND_bytes(random_bytes, PASSPHRASE_GENERATED_LENGTH) != 1) {
-        return SIGNET_ERROR_CRYPTO;
-    }
-#endif
     
     // Build passphrase ensuring at least 3 character classes
     // Force first 3 characters to be from different classes
@@ -588,22 +583,9 @@ int32_t GenerateRandomK0(uint8_t* k0_output) {
         return SIGNET_ERROR_INVALID_ARG;
     }
 
-#ifdef _WIN32
-    NTSTATUS status = BCryptGenRandom(
-        NULL,
-        k0_output,
-        32,
-        BCRYPT_USE_SYSTEM_PREFERRED_RNG
-    );
-
-    if (!BCRYPT_SUCCESS(status)) {
+    if (!CryptoRandom(k0_output, 32)) {
         return SIGNET_ERROR_CRYPTO;
     }
-#else
-    if (RAND_bytes(k0_output, 32) != 1) {
-        return SIGNET_ERROR_CRYPTO;
-    }
-#endif
 
     return SIGNET_SUCCESS;
 }

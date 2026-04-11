@@ -864,7 +864,7 @@ bool SendLevelPacket(AppState &state, const char *reason)
 		}
 
 	char multicast_ip[32] = {0};
-	SigNet::CalculateMulticastAddress(universe, multicast_ip);
+	SigNet::CalculateMulticastAddress(universe, multicast_ip, sizeof(multicast_ip));
 
 	const uint32_t sent_sequence = state.sequence_num;
 	if (!SendBuffer(state, buffer, multicast_ip))
@@ -1061,7 +1061,7 @@ std::string CurrentMulticastPreview(const AppState &state)
 		}
 
 	char multicast_ip[32] = {0};
-	if (SigNet::CalculateMulticastAddress(static_cast<uint16_t>(state.universe), multicast_ip) != SigNet::SIGNET_SUCCESS)
+	if (SigNet::CalculateMulticastAddress(static_cast<uint16_t>(state.universe), multicast_ip, sizeof(multicast_ip)) != SigNet::SIGNET_SUCCESS)
 		{
 			return "n/a";
 		}
