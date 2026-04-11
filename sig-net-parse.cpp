@@ -503,7 +503,7 @@ static uint8_t HexNibble(char ch)
 
 static int32_t NormalizeToken(const char* text,
                               char* out_token,
-                              uint16_t& out_size,
+                              size_t& out_size,
                               bool strip_0x_prefix)
 {
     if (!text || !out_token || out_size < 2) {
@@ -533,7 +533,7 @@ static int32_t NormalizeToken(const char* text,
         return SIGNET_ERROR_BUFFER_TOO_SMALL;
     }
 
-    out_size = static_cast<uint16_t>(len);
+    out_size = len;
 
     memcpy(out_token, begin, len);
     out_token[len] = '\0';
@@ -547,7 +547,7 @@ int32_t ParseHexBytes(const char* text, uint8_t* out_bytes, uint16_t byte_count)
     }
 
     char token[256];
-    uint16_t out_size = sizeof(token);
+    size_t out_size = sizeof(token);
     int32_t norm = NormalizeToken(text, token, out_size, true);
     if (norm != SIGNET_SUCCESS) {
         return norm;
@@ -582,7 +582,7 @@ int32_t ParseTUIDHex(const char* text, uint8_t out_tuid[6])
 int32_t ParseEndpointValue(const char* text, uint16_t& endpoint_out)
 {
     char token[64];
-    uint16_t out_size = sizeof(token);
+    size_t out_size = sizeof(token);
     int32_t norm = NormalizeToken(text, token, out_size, false);
     if (norm != SIGNET_SUCCESS) {
         return norm;
@@ -610,7 +610,7 @@ int32_t ParseEndpointValue(const char* text, uint16_t& endpoint_out)
 int32_t ParseHexWord(const char* text, uint16_t& value_out)
 {
     char token[64];
-    uint16_t out_size = sizeof(token);
+    size_t out_size = sizeof(token);
     int32_t norm = NormalizeToken(text, token, out_size, false);
     if (norm != SIGNET_SUCCESS) {
         return norm;
