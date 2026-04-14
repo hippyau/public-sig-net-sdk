@@ -69,6 +69,14 @@ void AddTestResult(TestSuiteResults& results,
 //==============================================================================
 
 void TestCryptoModule(TestSuiteResults& results) {
+#if defined(USE_MBEDTLS)
+    // Test 0 MbdedTLS initialisation
+    {
+        bool passed = Crypto::CryptoInit();
+        AddTestResult(results, "Crypto: MbedTLS RNG initialization (CTR_DRBG seed)",
+              passed, passed ? "" : "initialization failed");     
+    }
+#endif   
     // Test 1: K0 Length Validation
     {
         uint8_t test_k0[32];
@@ -322,7 +330,7 @@ void TestTLVModule(TestSuiteResults& results) {
         const char* fw_ver = "v1.0.0";
         
         int32_t result = TLV::BuildStartupAnnouncePayload(
-            payload, tuid, 0x534C, 0, (uint16_t)0x0100BC, fw_ver, 1, 0x01, 0);
+            payload, tuid, 0x534C, 0, 0x0100BC, fw_ver, 1, 0x01, 0);
         
         bool passed = (result == SIGNET_SUCCESS) && (payload.GetSize() > 0);
         AddTestResult(results, "TLV: Build Announce Payload",
@@ -360,7 +368,7 @@ void TestSendModule(TestSuiteResults& results) {
         char ip_buffer[16];
         uint16_t universe = 517;
         
-        int32_t result = CalculateMulticastAddress(universe, ip_buffer);
+        int32_t result = CalculateMulticastAddress(universe, ip_buffer, sizeof(ip_buffer));
         
         bool passed = (result == SIGNET_SUCCESS) &&
                       (strlen(ip_buffer) > 0) &&

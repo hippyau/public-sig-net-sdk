@@ -34,9 +34,9 @@
 #include <stdio.h>
 #include <string.h>
 
-// Note: No platform-specific socket headers needed in this module.
-// Multicast address formatting uses sprintf directly.
-// Network byte order encoding is handled by PacketBuffer::WriteUInt16/32.
+#ifdef _WIN32
+#include <winsock2.h>
+#endif
 
 namespace SigNet {
 
@@ -45,25 +45,35 @@ namespace SigNet {
 //------------------------------------------------------------------------------
 int32_t CalculateMulticastAddress(
     uint16_t universe,
-    char* ip_output
+    char* ip_output,
+    size_t ip_output_size
 ) {
-    if (!ip_output) {
+    if (!ip_output || ip_output_size == 0) {
         return SIGNET_ERROR_INVALID_ARG;
     }
-    
+
     if (universe < MIN_UNIVERSE || universe > MAX_UNIVERSE) {
         return SIGNET_ERROR_INVALID_ARG;
     }
-    
+
     // Multicast Folding Formula: Index = ((Universe - 1) % 100) + 1
     uint8_t index = static_cast<uint8_t>(((universe - 1) % 100) + 1);
-
-    // Build IP address string
-    sprintf(ip_output, "%d.%d.%d.%d",
-        (int)MULTICAST_BASE_OCTET_0,
-        (int)MULTICAST_BASE_OCTET_1,
-        (int)MULTICAST_BASE_OCTET_2,
-        (int)index);
+    
+    // Build IP address using proper network functions
+    struct in_addr addr;
+    addr.S_un.S_un_b.s_b1 = MULTICAST_BASE_OCTET_0;
+    addr.S_un.S_un_b.s_b2 = MULTICAST_BASE_OCTET_1;
+    addr.S_un.S_un_b.s_b3 = MULTICAST_BASE_OCTET_2;
+    addr.S_un.S_un_b.s_b4 = index;
+    
+    // Use inet_ntoa to convert to string
+    char* ip_str = inet_ntoa(addr);
+    if (ip_str) {
+        strcpy(ip_output, ip_str);
+    } else {
+        // Fallback if inet_ntoa fails
+        sprintf(ip_output, "239.254.0.%d", (int)index);
+    }
     
     return SIGNET_SUCCESS;
 }
@@ -175,7 +185,7 @@ int32_t BuildCommonSigNetOptions(
 }
 
 //------------------------------------------------------------------------------
-// Build Node URI-Path Options and URI String (/sig-net/v1/node/{tuid}/{endpoint})
+// Build Node URI-Path Options and URI String (/sig-net/v1/{scope}/node/{tuid}/{endpoint})
 //------------------------------------------------------------------------------
 int32_t BuildNodeURIPathOptions(
     PacketBuffer& buffer,
@@ -190,7 +200,7 @@ int32_t BuildNodeURIPathOptions(
 
     char tuid_hex[TUID_HEX_LENGTH + 1];
     tuid_hex[TUID_HEX_LENGTH] = '\0';
-    Crypto::TUID_ToHexString(tuid, tuid_hex);
+    Crypto::TUID_ToHexString(tuid, tuid_hex, sizeof(tuid_hex));
 
     char endpoint_str[6];
     int endpoint_written = snprintf(endpoint_str, sizeof(endpoint_str), "%u", endpoint);
@@ -201,9 +211,10 @@ int32_t BuildNodeURIPathOptions(
     int uri_written = snprintf(
         uri_output,
         uri_output_size,
-        "/%s/%s/%s/%s/%s",
+        "/%s/%s/%s/%s/%s/%s",
         SIGNET_URI_PREFIX,
         SIGNET_URI_VERSION,
+        CoAP::GetURIScope(),
         SIGNET_URI_NODE,
         tuid_hex,
         endpoint_str
@@ -231,6 +242,17 @@ int32_t BuildNodeURIPathOptions(
         prev_option,
         reinterpret_cast<const uint8_t*>(SIGNET_URI_VERSION),
         strlen(SIGNET_URI_VERSION)
+    );
+    if (result != SIGNET_SUCCESS) {
+        return result;
+    }
+
+    result = CoAP::EncodeCoAPOption(
+        buffer,
+        COAP_OPTION_URI_PATH,
+        prev_option,
+        reinterpret_cast<const uint8_t*>(CoAP::GetURIScope()),
+        strlen(CoAP::GetURIScope())
     );
     if (result != SIGNET_SUCCESS) {
         return result;
@@ -268,7 +290,7 @@ int32_t BuildNodeURIPathOptions(
 }
 
 //------------------------------------------------------------------------------
-// Build Poll URI-Path Options and URI String (/sig-net/v1/poll)
+// Build Poll URI-Path Options and URI String (/sig-net/v1/{scope}/poll)
 //------------------------------------------------------------------------------
 static int32_t BuildPollURIPathOptions(
     PacketBuffer& buffer,
@@ -282,9 +304,10 @@ static int32_t BuildPollURIPathOptions(
     int uri_written = snprintf(
         uri_output,
         uri_output_size,
-        "/%s/%s/%s",
+        "/%s/%s/%s/%s",
         SIGNET_URI_PREFIX,
         SIGNET_URI_VERSION,
+        CoAP::GetURIScope(),
         SIGNET_URI_POLL
     );
     if (uri_written < 0 || static_cast<uint32_t>(uri_written) >= uri_output_size) {
@@ -310,6 +333,17 @@ static int32_t BuildPollURIPathOptions(
         prev_option,
         reinterpret_cast<const uint8_t*>(SIGNET_URI_VERSION),
         strlen(SIGNET_URI_VERSION)
+    );
+    if (result != SIGNET_SUCCESS) {
+        return result;
+    }
+
+    result = CoAP::EncodeCoAPOption(
+        buffer,
+        COAP_OPTION_URI_PATH,
+        prev_option,
+        reinterpret_cast<const uint8_t*>(CoAP::GetURIScope()),
+        strlen(CoAP::GetURIScope())
     );
     if (result != SIGNET_SUCCESS) {
         return result;
@@ -476,7 +510,7 @@ int32_t BuildAnnouncePacket(
         return result;
     }
 
-    char uri_string[64];
+    char uri_string[URI_STRING_MIN_BUFFER];
     result = BuildNodeURIPathOptions(buffer, tuid, 0, uri_string, sizeof(uri_string));
     if (result != SIGNET_SUCCESS) {
         return result;
@@ -527,7 +561,7 @@ int32_t BuildAnnouncePacket(
 }
 
 //------------------------------------------------------------------------------
-// Build Manager Poll Packet (/sig-net/v1/poll)
+// Build Manager Poll Packet (/sig-net/v1/{scope}/poll)
 //------------------------------------------------------------------------------
 int32_t BuildPollPacket(
     PacketBuffer& buffer,
@@ -557,7 +591,7 @@ int32_t BuildPollPacket(
         return result;
     }
 
-    char uri_string[64];
+    char uri_string[URI_STRING_MIN_BUFFER];
     result = BuildPollURIPathOptions(buffer, uri_string, sizeof(uri_string));
     if (result != SIGNET_SUCCESS) {
         return result;

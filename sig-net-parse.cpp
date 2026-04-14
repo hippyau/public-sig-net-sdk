@@ -34,6 +34,7 @@
 #include "sig-net-parse.hpp"
 #include "sig-net-security.hpp"
 #include "sig-net-crypto.hpp"
+#include "sig-net-coap.hpp"
 #include <ctype.h>
 #include <stdlib.h>
 #include <string.h>
@@ -489,7 +490,7 @@ static uint8_t HexNibble(char ch)
 
 static int32_t NormalizeToken(const char* text,
                               char* out_token,
-                              uint16_t out_size,
+                              size_t& out_size,
                               bool strip_0x_prefix)
 {
     if (!text || !out_token || out_size < 2) {
@@ -519,6 +520,8 @@ static int32_t NormalizeToken(const char* text,
         return SIGNET_ERROR_BUFFER_TOO_SMALL;
     }
 
+    out_size = len;
+
     memcpy(out_token, begin, len);
     out_token[len] = '\0';
     return SIGNET_SUCCESS;
@@ -531,13 +534,13 @@ int32_t ParseHexBytes(const char* text, uint8_t* out_bytes, uint16_t byte_count)
     }
 
     char token[256];
-    int32_t norm = NormalizeToken(text, token, sizeof(token), true);
+    size_t out_size = sizeof(token);
+    int32_t norm = NormalizeToken(text, token, out_size, true);
     if (norm != SIGNET_SUCCESS) {
         return norm;
     }
 
-    size_t hex_len = strlen(token);
-    if (hex_len != (static_cast<size_t>(byte_count) * 2U)) {
+    if (out_size != (static_cast<size_t>(byte_count) * 2U)) {
         return SIGNET_ERROR_INVALID_ARG;
     }
 
@@ -566,7 +569,8 @@ int32_t ParseTUIDHex(const char* text, uint8_t out_tuid[6])
 int32_t ParseEndpointValue(const char* text, uint16_t& endpoint_out)
 {
     char token[64];
-    int32_t norm = NormalizeToken(text, token, sizeof(token), false);
+    size_t out_size = sizeof(token);
+    int32_t norm = NormalizeToken(text, token, out_size, false);
     if (norm != SIGNET_SUCCESS) {
         return norm;
     }
@@ -593,7 +597,8 @@ int32_t ParseEndpointValue(const char* text, uint16_t& endpoint_out)
 int32_t ParseHexWord(const char* text, uint16_t& value_out)
 {
     char token[64];
-    int32_t norm = NormalizeToken(text, token, sizeof(token), false);
+    size_t out_size = sizeof(token);
+    int32_t norm = NormalizeToken(text, token, out_size, false);
     if (norm != SIGNET_SUCCESS) {
         return norm;
     }
@@ -617,6 +622,48 @@ int32_t ParseHexWord(const char* text, uint16_t& value_out)
     }
 
     value_out = static_cast<uint16_t>(parsed);
+    return SIGNET_SUCCESS;
+}
+
+int32_t ValidateSigNetURI(const char* uri_string)
+{
+    if (!uri_string || uri_string[0] != '/') {
+        return SIGNET_ERROR_INVALID_PACKET;
+    }
+
+    const char* p = uri_string + 1;
+    const char* seg_end = strchr(p, '/');
+    if (!seg_end) {
+        return SIGNET_ERROR_INVALID_PACKET;
+    }
+    if ((size_t)(seg_end - p) != strlen(SIGNET_URI_PREFIX) ||
+        strncmp(p, SIGNET_URI_PREFIX, (size_t)(seg_end - p)) != 0) {
+        return SIGNET_ERROR_INVALID_PACKET;
+    }
+
+    p = seg_end + 1;
+    seg_end = strchr(p, '/');
+    if (!seg_end) {
+        return SIGNET_ERROR_INVALID_PACKET;
+    }
+    if ((size_t)(seg_end - p) != strlen(SIGNET_URI_VERSION) ||
+        strncmp(p, SIGNET_URI_VERSION, (size_t)(seg_end - p)) != 0) {
+        return SIGNET_ERROR_INVALID_PACKET;
+    }
+
+    p = seg_end + 1;
+    seg_end = strchr(p, '/');
+    if (!seg_end) {
+        return SIGNET_ERROR_INVALID_PACKET;
+    }
+
+    const size_t scope_len = (size_t)(seg_end - p);
+    const char* configured_scope = CoAP::GetURIScope();
+    const size_t configured_len = strlen(configured_scope);
+    if (scope_len != configured_len || strncmp(p, configured_scope, scope_len) != 0) {
+        return SIGNET_ERROR_INVALID_PACKET;
+    }
+
     return SIGNET_SUCCESS;
 }
 
@@ -663,14 +710,11 @@ int32_t VerifyPacketHMAC(
     }
     
     // Constant-time comparison to prevent timing attacks
-    volatile uint8_t diff = 0; // volatile to prevent compiler optimizations skipping SecureZero
-    for (uint32_t i = 0; i < HMAC_SHA256_LENGTH; i++) {
+    uint8_t diff = 0;
+    for (int i = 0; i < HMAC_SHA256_LENGTH; i++) {
         diff |= (computed_hmac[i] ^ options.hmac[i]);
     }
-
-    SecureZero(hmac_input, sizeof(hmac_input));
-    SecureZero(computed_hmac, sizeof(computed_hmac));
-
+    
     if (diff != 0) {
         return SIGNET_ERROR_HMAC_FAILED;
     }
