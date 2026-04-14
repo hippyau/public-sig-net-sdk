@@ -69,6 +69,14 @@ void AddTestResult(TestSuiteResults& results,
 //==============================================================================
 
 void TestCryptoModule(TestSuiteResults& results) {
+#if defined(USE_MBEDTLS)
+    // Test 0 MbdedTLS initialisation
+    {
+        bool passed = Crypto::CryptoInit();
+        AddTestResult(results, "Crypto: MbedTLS RNG initialization (CTR_DRBG seed)",
+              passed, passed ? "" : "initialization failed");
+    }
+#endif
     // Test 1: K0 Length Validation
     {
         uint8_t test_k0[32];

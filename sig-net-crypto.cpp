@@ -40,7 +40,12 @@
   #include <windows.h>
   #include <bcrypt.h>
   // Note: Link against bcrypt.lib in project settings
-#else
+#elif defined(USE_MBEDTLS)
+  #include <mbedtls/ctr_drbg.h>
+  #include <mbedtls/sha256.h>
+  #include <mbedtls/pkcs5.h>
+#elif defined(USE_OPENSSL)
+  #include <openssl/sha.h>
   #include <openssl/hmac.h>
   #include <openssl/evp.h>
   #include <openssl/rand.h>
@@ -50,10 +55,53 @@
 namespace SigNet {
 namespace Crypto {
 
+#if defined(USE_MBEDTLS)
+// Mbed TLS RNG state (must persist for lifetime of RNG usage)
+mbedtls_entropy_context   g_entropy;
+mbedtls_ctr_drbg_context  g_ctr_drbg;
+
+// State flags
+bool g_crypto_initialized = false;
+bool g_rng_ready = false;
+
+bool CryptoInit()
+{
+    static const char kPersonalization[] = "sig-net-sdk";
+
+    mbedtls_entropy_init(&g_entropy);
+    mbedtls_ctr_drbg_init(&g_ctr_drbg);
+
+    const int rc = mbedtls_ctr_drbg_seed(
+        &g_ctr_drbg,
+        mbedtls_entropy_func,
+        &g_entropy,
+        reinterpret_cast<const unsigned char*>(kPersonalization),
+        sizeof(kPersonalization) - 1
+    );
+
+    g_rng_ready = (rc == 0);
+    return g_rng_ready;
+}
+
+static bool CryptoEnsureInit() {
+    if (!g_crypto_initialized) {
+        if (!CryptoInit()) {
+            return false;
+        }
+    }
+    return true;
+}
+#endif
+
 inline bool CryptoRandom(uint8_t* p, size_t len) {
 #ifdef _WIN32
     return BCryptGenRandom(NULL, p, (ULONG)len, BCRYPT_USE_SYSTEM_PREFERRED_RNG) == BCRYPT_SUCCESS;
-#else
+#elif defined(USE_MBEDTLS)
+    if (!CryptoEnsureInit()) {
+        return false;
+    }
+    return mbedtls_ctr_drbg_random(&g_ctr_drbg, p, len) == 0;
+#elif defined(USE_OPENSSL)
     return RAND_bytes(p, len) == 1;
 #endif
 }
@@ -132,7 +180,25 @@ int32_t HMAC_SHA256(
     BCryptCloseAlgorithmProvider(hAlg, 0);
     
     return BCRYPT_SUCCESS(status) ? SIGNET_SUCCESS : SIGNET_ERROR_CRYPTO;
-#else
+#elif defined(USE_MBEDTLS)
+    const mbedtls_md_info_t* md = mbedtls_md_info_from_type(MBEDTLS_MD_SHA256);
+    if (!md) {
+        return SIGNET_ERROR_CRYPTO;
+    }
+
+    int rc = mbedtls_md_hmac(
+        md,
+        key, key_len,
+        message, msg_len,
+        output
+    );
+
+    if (rc != 0) {
+        return SIGNET_ERROR_CRYPTO;
+    }
+
+    return SIGNET_SUCCESS;
+#elif defined(USE_OPENSSL)
     unsigned int out_len = 0;
     unsigned char* result = ::HMAC(
         EVP_sha256(),
@@ -481,7 +547,22 @@ int32_t DeriveK0FromPassphrase(
     if (!BCRYPT_SUCCESS(status)) {
         return SIGNET_ERROR_CRYPTO;
     }
-#else
+#elif defined(USE_MBEDTLS)
+   const int rc = mbedtls_pkcs5_pbkdf2_hmac_ext(
+        MBEDTLS_MD_SHA256,
+        reinterpret_cast<const unsigned char*>(passphrase),
+        passphrase_len,
+        reinterpret_cast<const unsigned char*>(PBKDF2_SALT),
+        strlen(PBKDF2_SALT),
+        PBKDF2_ITERATIONS,
+        K0_KEY_LENGTH,
+        k0_output
+    );
+
+    if (rc != 0) {
+        return SIGNET_ERROR_CRYPTO;
+    }
+#elif defined(USE_OPENSSL)
     int result = PKCS5_PBKDF2_HMAC(
         passphrase,
         passphrase_len,

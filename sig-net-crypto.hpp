@@ -63,6 +63,25 @@ inline void SecureZero(void* ptr, size_t len) {
 
 namespace Crypto {
 
+#if defined(USE_MBEDTLS)
+//------------------------------------------------------------------------------
+// MbedTLS Crypto Subsystem Initialization (Internal / Self-Test Only)
+//
+// Initializes the Mbed TLS entropy and CTR_DRBG contexts used by the
+// CryptoRandom() backend.
+//
+// Notes:
+//   - This function is called automatically on first use by CryptoRandom().
+//   - End users do NOT need to call this function explicitly.
+//   - Provided for internal use and self-test validation only.
+//
+// Returns:
+//   true  on successful initialization
+//   false on failure (entropy or DRBG setup failed)
+//------------------------------------------------------------------------------
+bool CryptoInit();
+#endif
+
 //------------------------------------------------------------------------------
 // HMAC-SHA256 Implementation (RFC 2104)
 // 
