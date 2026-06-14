@@ -126,39 +126,28 @@ int32_t HMAC_SHA256(
     if (!key || !message || !output) {
         return SIGNET_ERROR_INVALID_ARG;
     }
-    
-    BCRYPT_ALG_HANDLE hAlg = NULL;
-    BCRYPT_HASH_HANDLE hHash = NULL;
-    NTSTATUS status;
-    
-    // Open algorithm provider for HMAC-SHA256
-    status = BCryptOpenAlgorithmProvider(
-        &hAlg,
-        BCRYPT_SHA256_ALGORITHM,
-        NULL,
-        BCRYPT_ALG_HANDLE_HMAC_FLAG
-    );
-    
-    if (!BCRYPT_SUCCESS(status)) {
+
+    BCRYPT_ALG_HANDLE hAlg = GetSha256AlgHandle();
+    if (!hAlg) {
         return SIGNET_ERROR_CRYPTO;
     }
-    
-    // Create hash object
-    status = BCryptCreateHash(
+
+    BCRYPT_HASH_HANDLE hHash = NULL;
+
+    NTSTATUS status = BCryptCreateHash(
         hAlg,
         &hHash,
         NULL,
         0,
         (PUCHAR)key,
         key_len,
-        0
+        BCRYPT_HASH_REUSABLE_FLAG
     );
-    
+
     if (!BCRYPT_SUCCESS(status)) {
-        BCryptCloseAlgorithmProvider(hAlg, 0);
         return SIGNET_ERROR_CRYPTO;
     }
-    
+
     // Hash the message
     status = BCryptHashData(
         hHash,
@@ -166,13 +155,12 @@ int32_t HMAC_SHA256(
         msg_len,
         0
     );
-    
+
     if (!BCRYPT_SUCCESS(status)) {
         BCryptDestroyHash(hHash);
-        BCryptCloseAlgorithmProvider(hAlg, 0);
         return SIGNET_ERROR_CRYPTO;
     }
-    
+
     // Finalize hash and get result
     status = BCryptFinishHash(
         hHash,
@@ -180,11 +168,9 @@ int32_t HMAC_SHA256(
         HMAC_SHA256_LENGTH,
         0
     );
-    
-    // Cleanup
+
     BCryptDestroyHash(hHash);
-    BCryptCloseAlgorithmProvider(hAlg, 0);
-    
+
     return BCRYPT_SUCCESS(status) ? SIGNET_SUCCESS : SIGNET_ERROR_CRYPTO;
 #elif defined(USE_MBEDTLS)
     const mbedtls_md_info_t* md = mbedtls_md_info_from_type(MBEDTLS_MD_SHA256);
