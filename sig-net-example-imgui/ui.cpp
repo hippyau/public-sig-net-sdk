@@ -531,7 +531,7 @@ void RenderTransmitTopRegion(App::AppState &state, float top_height, Uint32 now_
 									if (ImGui::BeginTabItem("Key Setup"))
 										{
 											InputLabel("Passphrase");
-											ImGui::SetNextItemWidth(-1.0f);
+											ImGui::SetNextItemWidth(-90.0f);
 											if (ImGui::InputText("##passphrase", state.passphrase, sizeof(state.passphrase))) App::RefreshPassphraseReport(state);
 											ImGui::SameLine();
 											StatusPill(PassphraseStatusLabel(state.passphrase_status), PassphraseStatusColor(state.passphrase_status));
@@ -545,7 +545,7 @@ void RenderTransmitTopRegion(App::AppState &state, float top_height, Uint32 now_
 											InputLabel("K0 Hex");
 											ImGui::SetNextItemWidth(-1.0f);
 											ImGui::InputText("##k0hex", state.k0_hex, sizeof(state.k0_hex));
-											if (ImGui::Button("Apply", ImVec2(-60.0f, 0.0f))) App::ApplyK0Hex(state);
+											if (ImGui::Button("Passphrase to K0", ImVec2(-60.0f, 0.0f))) App::ApplyK0Hex(state);
 											ImGui::SameLine();
 											if (ImGui::Button("Rnd##k0", ImVec2(52.0f, 0.0f))) App::GenerateRandomK0(state);
 											SectionDivider();
