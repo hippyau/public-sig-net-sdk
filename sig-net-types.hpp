@@ -107,9 +107,10 @@ struct SigNetOptions {
     uint16_t mfg_code;                   // SIGNET_OPTION_MFG_CODE (2 bytes)
     uint32_t session_id;                 // SIGNET_OPTION_SESSION_ID (4 bytes)
     uint32_t seq_num;                    // SIGNET_OPTION_SEQ_NUM (4 bytes)
+    uint16_t auth_length;                // Parsed auth option length (0 or 32 in v1)
     uint8_t  hmac[HMAC_SHA256_LENGTH];   // SIGNET_OPTION_HMAC (32 bytes)
     
-    SigNetOptions() : security_mode(0), mfg_code(0), session_id(0), seq_num(0) {
+    SigNetOptions() : security_mode(0), mfg_code(0), session_id(0), seq_num(0), auth_length(0) {
         memset(sender_id, 0, SENDER_ID_LENGTH);
         memset(hmac, 0, HMAC_SHA256_LENGTH);
     }
@@ -134,15 +135,12 @@ enum TidBlobValueType {
 
 static const uint16_t TID_BLOB_MAX_BYTES = 512;
 
-// 32-bit volatile flag for cross-thread (UI / RX) writes; aligned long is atomic on x86.
-typedef volatile long SigNetAtomicFlag;
-
 struct TidDataBlob {
     uint16_t tid;
     uint16_t length;
     uint8_t value_type;
-    SigNetAtomicFlag manager_is_stale;  // Set when UI changes the value; cleared after proactive TX
-    SigNetAtomicFlag ui_is_stale;       // Set when Sig-Net SET updates the value; cleared after UI sync
+    bool manager_is_stale;  // Set when UI changes the value; cleared after proactive TX
+    bool ui_is_stale;       // Set when Sig-Net SET updates the value; cleared after UI sync
     union {
         uint8_t u8;
         uint16_t u16;
@@ -152,7 +150,7 @@ struct TidDataBlob {
     } data;
 
     TidDataBlob() : tid(0), length(0), value_type(TID_BLOB_EMPTY),
-                    manager_is_stale(0), ui_is_stale(0) {
+                    manager_is_stale(false), ui_is_stale(false) {
         memset(data.bytes, 0, sizeof(data.bytes));
         data.text[0] = 0;
     }
@@ -231,7 +229,8 @@ struct EP1TidStore {
     TidDataBlob tid_ep_failover;
     TidDataBlob tid_ep_dmx_timing;
     TidDataBlob tid_ep_refresh_capability;
-    TidDataBlob tid_rdm_tod_background;  // TID_RDM_TOD_BACKGROUND (0x0305) – 1 byte
+    TidDataBlob tid_ep_protocol;
+    TidDataBlob tid_rdm_port_config;  // TID_RDM_PORT_CONFIG (0x0305) – 1 byte
     TidDataBlob tid_rdm_flow_control;    // TID_RDM_FLOW_CONTROL (0x0306) – 2 bytes
     TidDataBlob tid_rdm_tod_data;        // TID_RDM_TOD_DATA (0x0304) – [index,total,UIDs...]
     TidDataBlob tid_dg_level_foldback;   // TID_DG_LEVEL_FOLDBACK (0xFF03) – 1..512 bytes
@@ -251,7 +250,8 @@ struct EP1TidStore {
         tid_ep_failover.tid = TID_EP_FAILOVER;
         tid_ep_dmx_timing.tid = TID_EP_DMX_TIMING;
         tid_ep_refresh_capability.tid = TID_EP_REFRESH_CAPABILITY;
-        tid_rdm_tod_background.tid = TID_RDM_TOD_BACKGROUND;
+        tid_ep_protocol.tid = TID_EP_PROTOCOL;
+        tid_rdm_port_config.tid = TID_RDM_PORT_CONFIG;
         tid_rdm_flow_control.tid = TID_RDM_FLOW_CONTROL;
         tid_rdm_tod_data.tid = TID_RDM_TOD_DATA;
         tid_dg_level_foldback.tid = TID_DG_LEVEL_FOLDBACK;
@@ -277,12 +277,13 @@ struct NodeUserData {
 class PacketBuffer {
 public:
     PacketBuffer() : write_position_(0) {
-        // Buffer not zeroed; only write_position_ bytes are exposed by GetBuffer/GetSize.
+        memset(buffer_, 0, MAX_UDP_PAYLOAD);
     }
-
+    
     // Reset buffer for new packet construction
     void Reset() {
         write_position_ = 0;
+        memset(buffer_, 0, MAX_UDP_PAYLOAD);
     }
     
     // Get current write position

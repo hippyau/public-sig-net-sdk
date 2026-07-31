@@ -99,14 +99,6 @@ bool PacketReader::Skip(uint16_t count) {
     return true;
 }
 
-bool PacketReader::Seek(uint16_t new_position) {
-    if (new_position > size_) {
-        return false;
-    }
-    position_ = new_position;
-    return true;
-}
-
 bool PacketReader::PeekByte(uint8_t& value) const {
     if (position_ >= size_) {
         return false;
@@ -215,23 +207,13 @@ int32_t ParseCoAPOption(
         if (!reader.ReadUInt16(length_ext)) {
             return SIGNET_ERROR_BUFFER_TOO_SMALL;
         }
-        // 269 + 0xFFFF wraps uint16_t — widen, bound, then narrow.
-        uint32_t full = 269u + length_ext;
-        if (full > MAX_UDP_PAYLOAD) {
-            return SIGNET_ERROR_INVALID_PACKET;
-        }
-        length = static_cast<uint16_t>(full);
+        length = 269 + length_ext;
     }
     else if (length == 15) {
         // Reserved
         return SIGNET_ERROR_INVALID_PACKET;
     }
-
-    // Sig-Net options never exceed MAX_UDP_PAYLOAD; bound regardless of encoding.
-    if (length > MAX_UDP_PAYLOAD) {
-        return SIGNET_ERROR_INVALID_PACKET;
-    }
-
+    
     // Calculate absolute option number
     option_num = prev_option + delta;
     option_length = length;
@@ -271,24 +253,21 @@ int32_t ExtractURIString(
     bool first_segment = true;
     
     while (true) {
-        // Snapshot so we can rewind a non-Uri-Path option for the next phase.
-        uint16_t option_start_pos = reader.GetPosition();
-
         uint16_t option_num;
         const uint8_t* option_value;
         uint16_t option_length;
-
+        
         int32_t result = ParseCoAPOption(reader, current_option, option_num, option_value, option_length);
-
+        
         if (result == SIGNET_ERROR_INVALID_PACKET) {
             // Hit payload marker or end of options
             break;
         }
-
+        
         if (result != SIGNET_SUCCESS) {
             return result;
         }
-
+        
         // Check if this is a Uri-Path option (11)
         if (option_num == COAP_OPTION_URI_PATH) {
             // Add separator between segments (but not before first)
@@ -299,7 +278,7 @@ int32_t ExtractURIString(
                 uri_string[uri_pos++] = '/';
             }
             first_segment = false;
-
+            
             // Copy segment
             if (uri_pos + option_length > uri_buffer_size) {
                 return SIGNET_ERROR_BUFFER_FULL;
@@ -308,10 +287,12 @@ int32_t ExtractURIString(
             uri_pos += option_length;
         }
         else if (option_num > COAP_OPTION_URI_PATH) {
-            reader.Seek(option_start_pos);   // hand the option to the next phase
+            // Past Uri-Path options, need to rewind for next phase
+            // This is tricky - we'll handle it by stopping and letting
+            // ParseSigNetOptions re-parse from the beginning
             break;
         }
-
+        
         current_option = option_num;
     }
     
@@ -330,11 +311,12 @@ int32_t ExtractURIString(
 //------------------------------------------------------------------------------
 int32_t ParseSigNetOptions(
     PacketReader& reader,
-    SigNetOptions& options,
-    uint16_t initial_prev_option
+    SigNetOptions& options
 ) {
-    // 0 if starting fresh; COAP_OPTION_URI_PATH if chained after ExtractURIString.
-    uint16_t current_option = initial_prev_option;
+    // This function expects reader to be positioned after CoAP header + token,
+    // and will parse through Uri-Path options to find SigNet custom options
+    
+    uint16_t current_option = 0;
     bool found_security_mode = false;
     bool found_sender_id = false;
     bool found_mfg_code = false;
@@ -407,10 +389,14 @@ int32_t ParseSigNetOptions(
                 break;
                 
             case SIGNET_OPTION_HMAC:
-                if (option_length != HMAC_SHA256_LENGTH) {
+                options.auth_length = option_length;
+                if (option_length == HMAC_SHA256_LENGTH) {
+                    memcpy(options.hmac, option_value, HMAC_SHA256_LENGTH);
+                } else if (option_length == 0) {
+                    memset(options.hmac, 0, HMAC_SHA256_LENGTH);
+                } else {
                     return SIGNET_ERROR_INVALID_OPTION;
                 }
-                memcpy(options.hmac, option_value, HMAC_SHA256_LENGTH);
                 found_hmac = true;
                 break;
         }
@@ -418,18 +404,27 @@ int32_t ParseSigNetOptions(
         current_option = option_num;
     }
     
-    // Verify all required options were present
-    // (Except for Security-Mode 0xFF beacons which may have missing fields)
+    // Verify all fixed Sig-Net options are present.
     if (!found_security_mode) {
         return SIGNET_ERROR_INVALID_OPTION;
     }
-    
-    // For normal packets (not beacons), all options are required
-    if (options.security_mode != 0xFF) {
-        if (!found_sender_id || !found_mfg_code || !found_session_id || 
-            !found_seq_num || !found_hmac) {
+
+    if (!found_sender_id || !found_mfg_code || !found_session_id ||
+        !found_seq_num || !found_hmac) {
+        return SIGNET_ERROR_INVALID_OPTION;
+    }
+
+    if (options.security_mode == SECURITY_MODE_HMAC_SHA256) {
+        if (options.auth_length != HMAC_SHA256_LENGTH) {
             return SIGNET_ERROR_INVALID_OPTION;
         }
+    } else if (options.security_mode == SECURITY_MODE_OPEN ||
+               options.security_mode == SECURITY_MODE_UNPROVISIONED) {
+        if (options.auth_length != 0) {
+            return SIGNET_ERROR_INVALID_OPTION;
+        }
+    } else {
+        return SIGNET_ERROR_INVALID_OPTION;
     }
     
     return SIGNET_SUCCESS;
@@ -508,7 +503,7 @@ static uint8_t HexNibble(char ch)
 
 static int32_t NormalizeToken(const char* text,
                               char* out_token,
-                              size_t& out_size,
+                              uint16_t out_size,
                               bool strip_0x_prefix)
 {
     if (!text || !out_token || out_size < 2) {
@@ -538,8 +533,6 @@ static int32_t NormalizeToken(const char* text,
         return SIGNET_ERROR_BUFFER_TOO_SMALL;
     }
 
-    out_size = len;
-
     memcpy(out_token, begin, len);
     out_token[len] = '\0';
     return SIGNET_SUCCESS;
@@ -552,13 +545,13 @@ int32_t ParseHexBytes(const char* text, uint8_t* out_bytes, uint16_t byte_count)
     }
 
     char token[256];
-    size_t out_size = sizeof(token);
-    int32_t norm = NormalizeToken(text, token, out_size, true);
+    int32_t norm = NormalizeToken(text, token, sizeof(token), true);
     if (norm != SIGNET_SUCCESS) {
         return norm;
     }
 
-    if (out_size != (static_cast<size_t>(byte_count) * 2U)) {
+    size_t hex_len = strlen(token);
+    if (hex_len != (static_cast<size_t>(byte_count) * 2U)) {
         return SIGNET_ERROR_INVALID_ARG;
     }
 
@@ -587,8 +580,7 @@ int32_t ParseTUIDHex(const char* text, uint8_t out_tuid[6])
 int32_t ParseEndpointValue(const char* text, uint16_t& endpoint_out)
 {
     char token[64];
-    size_t out_size = sizeof(token);
-    int32_t norm = NormalizeToken(text, token, out_size, false);
+    int32_t norm = NormalizeToken(text, token, sizeof(token), false);
     if (norm != SIGNET_SUCCESS) {
         return norm;
     }
@@ -615,8 +607,7 @@ int32_t ParseEndpointValue(const char* text, uint16_t& endpoint_out)
 int32_t ParseHexWord(const char* text, uint16_t& value_out)
 {
     char token[64];
-    size_t out_size = sizeof(token);
-    int32_t norm = NormalizeToken(text, token, out_size, false);
+    int32_t norm = NormalizeToken(text, token, sizeof(token), false);
     if (norm != SIGNET_SUCCESS) {
         return norm;
     }
