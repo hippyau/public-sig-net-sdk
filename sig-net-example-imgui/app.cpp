@@ -490,19 +490,39 @@ bool ParseIncomingPacket(const Network::ReceivedDatagram &datagram, const AppSta
 			return false;
 		}
 
+	// ParseSigNetOptions must start from the beginning of the option run
+	// (it skips Uri-Path options internally). ExtractURIString advanced the
+	// first reader past the URI, so use a fresh reader for the options —
+	// mirroring the ExtractPayload pattern in sig-net-node-udp-listen.hpp.
+	SigNet::Parse::PacketReader option_reader(datagram.payload.data(), static_cast<uint16_t>(datagram.payload.size()));
+	SigNet::CoAPHeader temp_header{};
+	if (SigNet::Parse::ParseCoAPHeader(option_reader, temp_header) != SigNet::SIGNET_SUCCESS)
+		{
+			error_message = "Sig-Net option reader setup failed.";
+			return false;
+		}
+	if (SigNet::Parse::SkipToken(option_reader, header.GetTokenLength()) != SigNet::SIGNET_SUCCESS)
+		{
+			error_message = "Sig-Net option reader token skip failed.";
+			return false;
+		}
+
 	SigNet::SigNetOptions options;
-	rc = SigNet::Parse::ParseSigNetOptions(reader, options);
+	rc = SigNet::Parse::ParseSigNetOptions(option_reader, options);
 	if (rc != SigNet::SIGNET_SUCCESS)
 		{
 			error_message = FormatString("Sig-Net option parse failed: %d", rc);
 			return false;
 		}
 
+	// Locate the payload using the option reader (it's positioned after the
+	// SigNet options, right before the payload marker).
 	uint16_t payload_offset = static_cast<uint16_t>(datagram.payload.size());
-	if (!LocatePayloadOffset(datagram.payload.data(), static_cast<uint16_t>(datagram.payload.size()), payload_offset))
+	uint8_t marker = 0;
+	if (option_reader.PeekByte(marker) && marker == SigNet::COAP_PAYLOAD_MARKER)
 		{
-			error_message = "Failed to locate CoAP payload marker.";
-			return false;
+			option_reader.ReadByte(marker);
+			payload_offset = option_reader.GetPosition();
 		}
 
 	const uint8_t *payload = payload_offset < datagram.payload.size() ? datagram.payload.data() + payload_offset : nullptr;
