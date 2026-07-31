@@ -72,6 +72,9 @@ target_link_libraries(imgui-sdl2-opengl3 PUBLIC ${SIGNET_IMGUI_SDL2_TARGET} Open
 
 add_executable(sig-net-example-imgui
     main.cpp
+    network.cpp
+    app.cpp
+    ui.cpp
 )
 target_compile_definitions(sig-net-example-imgui PRIVATE SDL_MAIN_HANDLED)
 target_link_libraries(sig-net-example-imgui PRIVATE

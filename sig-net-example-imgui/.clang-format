@@ -1,0 +1,14 @@
+BasedOnStyle: LLVM
+IndentWidth: 8
+UseTab: Always
+BreakBeforeBraces: GNU
+AlignAfterOpenBracket: Align
+AllowShortIfStatementsOnASingleLine: true
+AllowShortLoopsOnASingleLine: true
+AllowShortFunctionsOnASingleLine: true
+EmptyLineAfterAccessModifier: Always
+EmptyLineBeforeAccessModifier: Leave
+IndentAccessModifiers: true
+MaxEmptyLinesToKeep: 3 
+IndentCaseLabels: true
+ColumnLimit: 240
