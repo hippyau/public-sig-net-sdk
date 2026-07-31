@@ -33,3 +33,6 @@
 !sig-net-example-tid-level-tx/Win32/Debug/
 sig-net-example-tid-level-tx/Win32/Debug/*
 !sig-net-example-tid-level-tx/Win32/Debug/*.exe
+
+build/
+/home/hip/dev/public-sig-net-sdk/sig-net-example-imgui/build
