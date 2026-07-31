@@ -45,6 +45,7 @@ add_library(sig-net-imgui-sdk STATIC
     ../sig-net-tlv.cpp
     ../sig-net-parse.cpp
     ../sig-net-selftest.cpp
+    ../sig-net-node-data.cpp
 )
 target_include_directories(sig-net-imgui-sdk PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/..)
 

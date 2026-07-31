@@ -10,6 +10,9 @@
 
 #include "app.hpp"
 
+#include "sig-net-send.hpp"
+#include "sig-net-tlv.hpp"
+
 #include <SDL.h>
 
 #include <algorithm>
@@ -490,39 +493,19 @@ bool ParseIncomingPacket(const Network::ReceivedDatagram &datagram, const AppSta
 			return false;
 		}
 
-	// ParseSigNetOptions must start from the beginning of the option run
-	// (it skips Uri-Path options internally). ExtractURIString advanced the
-	// first reader past the URI, so use a fresh reader for the options —
-	// mirroring the ExtractPayload pattern in sig-net-node-udp-listen.hpp.
-	SigNet::Parse::PacketReader option_reader(datagram.payload.data(), static_cast<uint16_t>(datagram.payload.size()));
-	SigNet::CoAPHeader temp_header{};
-	if (SigNet::Parse::ParseCoAPHeader(option_reader, temp_header) != SigNet::SIGNET_SUCCESS)
-		{
-			error_message = "Sig-Net option reader setup failed.";
-			return false;
-		}
-	if (SigNet::Parse::SkipToken(option_reader, header.GetTokenLength()) != SigNet::SIGNET_SUCCESS)
-		{
-			error_message = "Sig-Net option reader token skip failed.";
-			return false;
-		}
-
 	SigNet::SigNetOptions options;
-	rc = SigNet::Parse::ParseSigNetOptions(option_reader, options);
+	rc = SigNet::Parse::ParseSigNetOptions(reader, options);
 	if (rc != SigNet::SIGNET_SUCCESS)
 		{
 			error_message = FormatString("Sig-Net option parse failed: %d", rc);
 			return false;
 		}
 
-	// Locate the payload using the option reader (it's positioned after the
-	// SigNet options, right before the payload marker).
 	uint16_t payload_offset = static_cast<uint16_t>(datagram.payload.size());
-	uint8_t marker = 0;
-	if (option_reader.PeekByte(marker) && marker == SigNet::COAP_PAYLOAD_MARKER)
+	if (!LocatePayloadOffset(datagram.payload.data(), static_cast<uint16_t>(datagram.payload.size()), payload_offset))
 		{
-			option_reader.ReadByte(marker);
-			payload_offset = option_reader.GetPosition();
+			error_message = "Failed to locate CoAP payload marker.";
+			return false;
 		}
 
 	const uint8_t *payload = payload_offset < datagram.payload.size() ? datagram.payload.data() + payload_offset : nullptr;
@@ -690,6 +673,29 @@ bool DeriveKeysFromK0(AppState &state)
 	return true;
 }
 
+bool DeriveAllKeys(AppState &state)
+{
+	if (!DeriveKeysFromK0(state))
+		{
+			return false;
+		}
+
+	if (SigNet::Crypto::DeriveManagerGlobalKey(state.k0_key.data(), state.manager_global_key.data()) != SigNet::SIGNET_SUCCESS)
+		{
+			LogError(state, "Failed to derive manager global key.");
+			return false;
+		}
+
+	if (SigNet::Crypto::DeriveManagerLocalKey(state.k0_key.data(), state.tuid.data(), state.manager_local_key.data()) != SigNet::SIGNET_SUCCESS)
+		{
+			LogError(state, "Failed to derive manager local key.");
+			return false;
+		}
+
+	LogMessage(state, "Derived all keys: Ks, Kc, Km_global, Km_local.");
+	return true;
+}
+
 bool ApplyK0Hex(AppState &state)
 {
 	if (!ParseFixedHex(state.k0_hex, state.k0_key.data(), state.k0_key.size()))
@@ -698,12 +704,12 @@ bool ApplyK0Hex(AppState &state)
 			return false;
 		}
 
-	if (!DeriveKeysFromK0(state))
+	if (!DeriveAllKeys(state))
 		{
 			return false;
 		}
 
-	LogMessage(state, "K0 applied and Ks/Kc derived successfully.");
+	LogMessage(state, "K0 applied and all keys derived successfully.");
 	return true;
 }
 
@@ -722,12 +728,12 @@ bool DeriveK0FromPassphrase(AppState &state)
 			return false;
 		}
 
-	if (!DeriveKeysFromK0(state))
+	if (!DeriveAllKeys(state))
 		{
 			return false;
 		}
 
-	LogMessage(state, "Derived K0 from passphrase and updated Ks/Kc.");
+	LogMessage(state, "Derived K0 from passphrase and updated all keys.");
 	return true;
 }
 
@@ -739,12 +745,12 @@ bool GenerateRandomK0(AppState &state)
 			return false;
 		}
 
-	if (!DeriveKeysFromK0(state))
+	if (!DeriveAllKeys(state))
 		{
 			return false;
 		}
 
-	LogMessage(state, "Generated random K0 and updated Ks/Kc.");
+	LogMessage(state, "Generated random K0 and updated all keys.");
 	return true;
 }
 
@@ -1141,6 +1147,160 @@ std::string FormatAgeLabel(uint32_t last_seen_tick, uint32_t now_ticks)
 }
 
 //==============================================================================
+// Node simulator helpers (anonymous namespace)
+//==============================================================================
+
+namespace
+{
+
+// Internal helper: send a response packet with TLV payload
+bool SendNodeResponse(AppState &state, SigNet::PacketBuffer &payload_buffer, const char *destination_ip)
+{
+	SigNet::PacketBuffer buffer;
+	int32_t rc = SigNet::BuildDMXPacket(buffer, static_cast<uint16_t>(state.universe), payload_buffer.GetBuffer(), static_cast<uint16_t>(payload_buffer.GetSize()), state.node_config.tuid, state.node_config.endpoint, 0x0000, state.session_id, state.sequence_num, state.citizen_key.data(), state.message_id);
+	if (rc != SigNet::SIGNET_SUCCESS)
+		{
+			LogError(state, FormatString("Failed to build response packet: error %d", rc));
+			return false;
+		}
+	return SendBuffer(state, buffer, destination_ip);
+}
+
+// Internal helper: emit security event
+void EmitSecurityEvent(AppState &state, uint8_t event_code, const char *source_ip)
+{
+	if (!state.keys_valid)
+		{
+			return;
+		}
+
+	SigNet::PacketBuffer payload;
+	uint8_t event_data[8];
+	event_data[0] = event_code;
+	std::memset(event_data + 1, 0, 7);
+	SigNet::Node::AppendNodeTLVRaw(payload, SigNet::TID_DG_SECURITY_EVENT, event_data, sizeof(event_data));
+
+	SigNet::PacketBuffer buffer;
+	int32_t rc = SigNet::BuildDMXPacket(buffer, static_cast<uint16_t>(state.universe), payload.GetBuffer(), static_cast<uint16_t>(payload.GetSize()), state.node_config.tuid, state.node_config.endpoint, 0x0000, state.session_id, state.sequence_num, state.citizen_key.data(), state.message_id);
+	if (rc == SigNet::SIGNET_SUCCESS)
+		{
+			SendBuffer(state, buffer, SigNet::MULTICAST_NODE_SEND_IP);
+		}
+}
+
+// Handle TID_POLL — respond with poll reply at configured query level
+bool HandlePoll(AppState &state, const char *destination_ip, uint32_t query_level)
+{
+	if (!state.node_simulator_respond_to_polls)
+		{
+			return false;
+		}
+
+	state.last_manager_poll_tick = SDL_GetTicks();
+	if (state.in_lost_mode)
+		{
+			state.in_lost_mode = false;
+			LogMessage(state, "Exited lost mode — manager poll received.");
+		}
+
+	LogReceiveMessage(state, FormatString("Received TID_POLL (query_level=%d)", query_level));
+
+	SigNet::PacketBuffer payload;
+	int32_t payload_len = SigNet::Node::BuildNodeQueryPayload(static_cast<uint8_t>(query_level), state.node_config.endpoint, state.node_user_data, state.node_config, payload);
+	if (payload_len <= 0)
+		{
+			LogError(state, "Failed to build poll reply payload.");
+			return false;
+		}
+
+	if (SendNodeResponse(state, payload, destination_ip))
+		{
+			LogMessage(state, FormatString("Poll reply sent (query_level=%d, payload=%d bytes).", query_level, payload_len));
+			++state.node_stats_poll_responses;
+			return true;
+		}
+	return false;
+}
+
+// Handle TID_GET — find the TID blob and respond
+bool HandleGet(AppState &state, uint16_t tid, const char *destination_ip)
+{
+	if (!state.node_simulator_respond_to_gets)
+		{
+			return false;
+		}
+
+	LogReceiveMessage(state, FormatString("Received TID_GET for TID 0x%04X", tid));
+
+	const auto *blob = SigNet::Node::FindSupportedTidBlob(state.node_user_data, tid);
+	if (!blob || blob->length == 0)
+		{
+			LogReceiveMessage(state, FormatString("TID_GET 0x%04X: no data available", tid));
+			return false;
+		}
+
+	SigNet::PacketBuffer payload;
+	SigNet::Node::AppendNodeTLVRaw(payload, tid, blob->data.bytes, blob->length);
+
+	if (SendNodeResponse(state, payload, destination_ip))
+		{
+			LogMessage(state, FormatString("GET reply sent for TID 0x%04X (%d bytes).", tid, blob->length));
+			++state.node_stats_get_responses;
+			return true;
+		}
+	return false;
+}
+
+// Handle TID_SET — validate, apply, and respond
+bool HandleSet(AppState &state, uint16_t tid, const uint8_t *value, uint16_t length, const char *destination_ip)
+{
+	if (!state.node_simulator_respond_to_sets)
+		{
+			return false;
+		}
+
+	LogReceiveMessage(state, FormatString("Received TID_SET for TID 0x%04X (%d bytes)", tid, length));
+
+	if (!SigNet::Node::IsValidSetPayload(tid, value, length))
+		{
+			LogReceiveMessage(state, FormatString("TID_SET 0x%04X: payload validation failed", tid));
+			return false;
+		}
+
+	auto *blob = SigNet::Node::FindSupportedTidBlob(state.node_user_data, tid);
+	if (!blob)
+		{
+			LogReceiveMessage(state, FormatString("TID_SET 0x%04X: TID not supported", tid));
+			return false;
+		}
+
+	bool changed = false;
+	if (SigNet::Node::StoreNodeBlobFromBytesIfChanged(*blob, tid, value, length, 0, changed))
+		{
+			if (changed)
+				{
+					++state.node_config.change_count;
+					blob->manager_is_stale = true;
+					LogMessage(state, FormatString("TID_SET 0x%04X: value updated (change_count=%d).", tid, state.node_config.change_count));
+				}
+
+			SigNet::PacketBuffer payload;
+			uint8_t reply_value = 0x01;
+			SigNet::Node::AppendNodeTLVRaw(payload, SigNet::TID_SET_REPLY, &reply_value, 1);
+
+			if (SendNodeResponse(state, payload, destination_ip))
+				{
+					++state.node_stats_set_responses;
+					return true;
+				}
+		}
+
+	return false;
+}
+
+} // namespace
+
+//==============================================================================
 // Receiver / packet parsing
 //==============================================================================
 
@@ -1173,6 +1333,149 @@ void ProcessReceivedDatagram(AppState &state, const Network::ReceivedDatagram &d
 			if (state.last_received_preview.verify_attempted && !state.last_received_preview.hmac_verified)
 				{
 					LogReceiveMessage(state, FormatString("Announce HMAC mismatch for %s", discovered_node.tuid_hex.c_str()));
+				}
+		}
+
+	// Node simulator: dispatch incoming packets to handlers
+	if (!state.node_simulator_enabled || !state.keys_valid)
+		{
+			return;
+		}
+
+	// Use SelectValidationKey for proper key selection per URI lane
+	const uint8_t *validation_key = SigNet::Node::SelectValidationKey(
+		preview.uri.c_str(),
+		state.manager_global_key.data(),
+		state.manager_local_key.data(),
+		state.citizen_key.data(),
+		state.sender_key.data());
+
+	if (validation_key)
+		{
+			// Verify HMAC using the correct key
+			SigNet::SigNetOptions options;
+			SigNet::Parse::PacketReader reader(datagram.payload.data(), static_cast<uint16_t>(datagram.payload.size()));
+			SigNet::CoAPHeader header{};
+			int32_t rc = SigNet::Parse::ParseCoAPHeader(reader, header);
+			if (rc == SigNet::SIGNET_SUCCESS)
+				{
+					SigNet::Parse::SkipToken(reader, header.GetTokenLength());
+					SigNet::Parse::ParseSigNetOptions(reader, options);
+
+					// Freshness/replay check
+					uint32_t now_ms = SDL_GetTicks();
+					if (!SigNet::Node::ValidateAndCommitFreshness(state.freshness_tracker, options, now_ms))
+						{
+							++state.node_stats_replay_rejected;
+							LogReceiveMessage(state, FormatString("Replay rejected: session=%u seq=%u from %s", options.session_id, options.seq_num, datagram.source_ip.c_str()));
+							EmitSecurityEvent(state, 0x02, datagram.source_ip.c_str()); // Replay detected
+							return;
+						}
+
+					// HMAC verification
+					uint16_t payload_offset = static_cast<uint16_t>(datagram.payload.size());
+					if (!LocatePayloadOffset(datagram.payload.data(), static_cast<uint16_t>(datagram.payload.size()), payload_offset))
+						{
+							payload_offset = datagram.payload.size();
+						}
+					const uint8_t *payload = payload_offset < datagram.payload.size() ? datagram.payload.data() + payload_offset : nullptr;
+					const uint16_t payload_length = payload_offset < datagram.payload.size() ? static_cast<uint16_t>(datagram.payload.size() - payload_offset) : 0;
+
+					if (SigNet::Parse::VerifyPacketHMAC(preview.uri.c_str(), options, payload, payload_length, validation_key) != SigNet::SIGNET_SUCCESS)
+						{
+							++state.node_stats_hmac_failures;
+							LogReceiveMessage(state, FormatString("HMAC verification failed for %s from %s", preview.uri.c_str(), datagram.source_ip.c_str()));
+							EmitSecurityEvent(state, 0x01, datagram.source_ip.c_str()); // HMAC failure
+							return;
+						}
+				}
+		}
+
+	// Parse CoAP code to determine packet type for dispatch
+	SigNet::Parse::PacketReader dispatch_reader(datagram.payload.data(), static_cast<uint16_t>(datagram.payload.size()));
+	SigNet::CoAPHeader dispatch_header{};
+	int32_t dispatch_rc = SigNet::Parse::ParseCoAPHeader(dispatch_reader, dispatch_header);
+	if (dispatch_rc != SigNet::SIGNET_SUCCESS)
+		{
+			return;
+		}
+
+	// Extract payload for SET/POLL handling
+	uint16_t payload_offset = static_cast<uint16_t>(datagram.payload.size());
+	if (!LocatePayloadOffset(datagram.payload.data(), static_cast<uint16_t>(datagram.payload.size()), payload_offset))
+		{
+			payload_offset = datagram.payload.size();
+		}
+	const uint8_t *payload = payload_offset < datagram.payload.size() ? datagram.payload.data() + payload_offset : nullptr;
+	const uint16_t payload_length = payload_offset < datagram.payload.size() ? static_cast<uint16_t>(datagram.payload.size() - payload_offset) : 0;
+
+	// Check URI lane for dispatch
+	const std::string uri = preview.uri;
+	const std::string poll_prefix = std::string("/sig-net/v1/") + SigNet::CoAP::GetURIScope() + "/poll";
+	const std::string manager_prefix = std::string("/sig-net/v1/") + SigNet::CoAP::GetURIScope() + "/manager/";
+
+	if (uri.find(poll_prefix) == 0)
+		{
+			// TID_POLL — extract query level from payload if present
+			uint32_t query_level = state.node_simulator_query_level; // default to configured level
+			if (payload && payload_length >= 4)
+				{
+					SigNet::Parse::PacketReader tlv_reader(payload, payload_length);
+					while (tlv_reader.GetRemaining() > 0)
+						{
+							SigNet::TLVBlock tlv;
+							if (SigNet::Parse::ParseTLVBlock(tlv_reader, tlv) != SigNet::SIGNET_SUCCESS)
+								{
+									break;
+								}
+							if (tlv.type_id == SigNet::TID_POLL)
+								{
+									if (tlv.length >= 1)
+										{
+											query_level = tlv.value[0];
+										}
+									break;
+								}
+						}
+				}
+			HandlePoll(state, datagram.source_ip.c_str(), query_level);
+		}
+	else if (uri.find(manager_prefix) == 0)
+		{
+			// Manager lane — check CoAP code for GET/SET
+			if (dispatch_header.code == SigNet::COAP_CODE_GET)
+				{
+					// Extract TID from payload
+					if (payload && payload_length >= 4)
+						{
+							SigNet::Parse::PacketReader tlv_reader(payload, payload_length);
+							while (tlv_reader.GetRemaining() > 0)
+								{
+									SigNet::TLVBlock tlv;
+									if (SigNet::Parse::ParseTLVBlock(tlv_reader, tlv) != SigNet::SIGNET_SUCCESS)
+										{
+											break;
+										}
+									HandleGet(state, tlv.type_id, datagram.source_ip.c_str());
+								}
+						}
+				}
+			else if (dispatch_header.code == SigNet::COAP_CODE_PUT || dispatch_header.code == SigNet::COAP_CODE_POST)
+				{
+					// SET request — parse TLV and apply
+					if (payload && payload_length >= 4)
+						{
+							SigNet::Parse::PacketReader tlv_reader(payload, payload_length);
+							while (tlv_reader.GetRemaining() > 0)
+								{
+									SigNet::TLVBlock tlv;
+									if (SigNet::Parse::ParseTLVBlock(tlv_reader, tlv) != SigNet::SIGNET_SUCCESS)
+										{
+											break;
+										}
+									HandleSet(state, tlv.type_id, tlv.value, tlv.length, datagram.source_ip.c_str());
+								}
+						}
 				}
 		}
 }
@@ -1255,6 +1558,237 @@ void UpdateReceiver(AppState &state)
 }
 
 //==============================================================================
+// Node simulator
+//==============================================================================
+
+const char *QueryLevelLabel(int level)
+{
+	switch (level)
+		{
+			case SigNet::QUERY_HEARTBEAT:
+				return "Heartbeat";
+			case SigNet::QUERY_CONFIG:
+				return "Config";
+			case SigNet::QUERY_FULL:
+				return "Full";
+			case SigNet::QUERY_EXTENDED:
+				return "Extended";
+			default:
+				return "Unknown";
+		}
+}
+
+void InitializeNodeData(AppState &state)
+{
+	// Copy TUID from the app state
+	std::memcpy(state.node_config.tuid, state.tuid.data(), 6);
+	state.node_config.mfg_code = 0x5379;
+	state.node_config.product_variant_id = 0x0001;
+	state.node_config.endpoint = 1;
+	state.node_config.change_count = 0;
+
+	// Initialize all TID blobs with defaults (no SDK init function exists)
+	for (int i = 0; i < SigNet::Node::GetSupportedRootBlobCount(); ++i)
+	{
+		auto *b = SigNet::Node::GetSupportedRootBlobByIndex(state.node_user_data, i);
+		if (b)
+		{
+			b->tid = 0;
+			b->length = 0;
+			b->value_type = SigNet::TID_BLOB_EMPTY;
+			b->manager_is_stale = false;
+			b->ui_is_stale = false;
+			memset(b->data.bytes, 0, sizeof(b->data.bytes));
+			b->data.text[0] = 0;
+		}
+	}
+	for (int i = 0; i < SigNet::Node::GetSupportedDataBlobCount(); ++i)
+	{
+		auto *b = SigNet::Node::GetSupportedDataBlobByIndex(state.node_user_data, i);
+		if (b)
+		{
+			b->tid = 0;
+			b->length = 0;
+			b->value_type = SigNet::TID_BLOB_EMPTY;
+			b->manager_is_stale = false;
+			b->ui_is_stale = false;
+			memset(b->data.bytes, 0, sizeof(b->data.bytes));
+			b->data.text[0] = 0;
+		}
+	}
+
+	// Sync TUID into the supported TIDs blob
+	std::memcpy(state.node_user_data.root.tid_rt_supported_tids.data.bytes, state.tuid.data(), 6);
+	state.node_user_data.root.tid_rt_supported_tids.length = 6;
+	state.node_user_data.root.tid_rt_supported_tids.value_type = SigNet::TID_BLOB_BYTES;
+
+	// Reset freshness tracker
+	SigNet::Node::ResetFreshnessTracker(state.freshness_tracker);
+
+	// Reset lost mode state
+	state.in_lost_mode = false;
+	state.last_manager_poll_tick = 0;
+
+	LogMessage(state, "Node simulator data initialized.");
+}
+
+void SendProactiveResponses(AppState &state)
+{
+	if (!state.node_simulator_enabled || !state.node_simulator_proactive_responses || !state.keys_valid)
+		{
+			return;
+		}
+
+	// Check if any TID blob has manager_is_stale set
+	bool any_stale = false;
+	for (int i = 0; i < SigNet::Node::GetSupportedRootBlobCount(); ++i)
+		{
+			auto *blob = SigNet::Node::GetSupportedRootBlobByIndex(state.node_user_data, i);
+			if (blob && blob->manager_is_stale)
+				{
+					any_stale = true;
+					break;
+				}
+		}
+		if (!any_stale)
+		{
+			for (int i = 0; i < SigNet::Node::GetSupportedDataBlobCount(); ++i)
+				{
+					auto *blob = SigNet::Node::GetSupportedDataBlobByIndex(state.node_user_data, i);
+					if (blob && blob->manager_is_stale)
+						{
+							any_stale = true;
+							break;
+						}
+				}
+		}
+
+	if (!any_stale)
+		{
+			return;
+		}
+
+	// Send a proactive poll reply at the configured query level
+	SigNet::PacketBuffer payload;
+	int32_t payload_len = SigNet::Node::BuildNodeQueryPayload(static_cast<uint8_t>(state.node_simulator_query_level), state.node_config.endpoint, state.node_user_data, state.node_config, payload);
+	if (payload_len <= 0)
+		{
+			LogError(state, "Failed to build proactive poll reply payload.");
+			return;
+		}
+
+	SigNet::PacketBuffer buffer;
+	int32_t rc = SigNet::BuildDMXPacket(buffer, static_cast<uint16_t>(state.universe), payload.GetBuffer(), static_cast<uint16_t>(payload_len), state.node_config.tuid, state.node_config.endpoint, 0x0000, state.session_id, state.sequence_num, state.citizen_key.data(), state.message_id);
+	if (rc != SigNet::SIGNET_SUCCESS)
+		{
+		LogError(state, FormatString("Failed to build proactive poll reply: error %d", rc));
+		return;
+	}
+
+	// Clear stale flags
+	SigNet::Node::ClearAllManagerStaleFlags(state.node_user_data);
+
+	// Send to manager poll multicast (same as node send for proactive)
+	char manager_ip[32] = {0};
+	SigNet::CalculateMulticastAddress(static_cast<uint16_t>(state.universe), manager_ip, sizeof(manager_ip));
+	if (SendBuffer(state, buffer, manager_ip))
+		{
+			LogMessage(state, FormatString("Proactive poll reply sent (stale TIDs cleared)."));
+			++state.node_stats_poll_responses;
+		}
+}
+
+void CheckLostMode(AppState &state)
+{
+	if (!state.node_simulator_enabled || !state.node_simulator_lost_mode)
+		{
+			return;
+		}
+
+	uint32_t current_tick = SDL_GetTicks();
+
+	// If we've never received a poll, don't trigger lost mode yet
+	if (state.last_manager_poll_tick == 0)
+		{
+			return;
+		}
+
+	uint32_t elapsed = current_tick - state.last_manager_poll_tick;
+	if (elapsed >= state.node_lost_timeout_ms && !state.in_lost_mode)
+		{
+			state.in_lost_mode = true;
+			LogMessage(state, FormatString("Lost mode entered after %lu ms without manager poll.", static_cast<unsigned long>(elapsed)));
+			SendNodeLostAnnounce(state);
+		}
+}
+
+void SendNodeLostAnnounce(AppState &state)
+{
+	if (!state.keys_valid)
+		{
+			LogError(state, "Cannot send node-lost announce: keys not valid.");
+			return;
+		}
+
+	SigNet::PacketBuffer buffer;
+	int32_t rc = SigNet::BuildAnnouncePacket(buffer, state.node_config.tuid, state.node_config.mfg_code, state.node_config.product_variant_id, 0, "", 0x01, SigNet::ROLE_CAP_NODE, 0x0000, state.session_id, state.sequence_num, state.citizen_key.data(), state.message_id);
+	if (rc != SigNet::SIGNET_SUCCESS)
+		{
+			LogError(state, FormatString("Failed to build node-lost announce: error %d", rc));
+			return;
+		}
+
+	if (SendBuffer(state, buffer, SigNet::MULTICAST_NODE_LOST_IP))
+		{
+			LogMessage(state, FormatString("Node-lost announce sent to %s", SigNet::MULTICAST_NODE_LOST_IP));
+		}
+}
+
+void Deprovision(AppState &state)
+{
+	// Wipe all keys
+	std::memset(state.k0_key.data(), 0, state.k0_key.size());
+	std::memset(state.sender_key.data(), 0, state.sender_key.size());
+	std::memset(state.citizen_key.data(), 0, state.citizen_key.size());
+	std::memset(state.manager_global_key.data(), 0, state.manager_global_key.size());
+	std::memset(state.manager_local_key.data(), 0, state.manager_local_key.size());
+	state.keys_valid = false;
+	state.k0_set = false;
+
+	// Clear key hex displays
+	std::memset(state.k0_hex, 0, sizeof(state.k0_hex));
+	std::memset(state.sender_key_hex, 0, sizeof(state.sender_key_hex));
+	std::memset(state.citizen_key_hex, 0, sizeof(state.citizen_key_hex));
+
+	// Reset freshness tracker
+	SigNet::Node::ResetFreshnessTracker(state.freshness_tracker);
+
+	// Reset lost mode
+	state.in_lost_mode = false;
+	state.last_manager_poll_tick = 0;
+
+	LogMessage(state, "Device deprovisioned — all keys wiped.");
+}
+
+void UpdateNodeSimulator(AppState &state, uint32_t current_tick)
+{
+	if (!state.node_simulator_enabled || !state.keys_valid)
+		{
+			return;
+		}
+
+	// Proactive response check (every interval)
+	if (current_tick - state.last_proactive_check_tick >= state.node_simulator_proactive_interval_ms)
+		{
+			state.last_proactive_check_tick = current_tick;
+			SendProactiveResponses(state);
+		}
+
+	// Lost mode check
+	CheckLostMode(state);
+}
+
+//==============================================================================
 // Initialization
 //==============================================================================
 
@@ -1267,6 +1801,10 @@ void InitializeState(AppState &state)
 		{
 			CopyString(state.source_ip, sizeof(state.source_ip), state.interfaces[state.selected_interface_index].ip);
 		}
+
+	// Initialize node simulator data
+	InitializeNodeData(state);
+
 	LogMessage(state, "Sig-Net ImGui example initialized.");
 	LogMessage(state, "Compact dashboard mode enabled.");
 	LogReceiveMessage(state, "Receive mode ready. Enable the receiver to discover announces.");

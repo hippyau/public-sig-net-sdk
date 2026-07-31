@@ -14,6 +14,9 @@
 
 #include "network.hpp"
 
+#include "sig-net-node-data.hpp"
+#include "sig-net-node-profile.hpp"
+#include "sig-net-node-udp-listen.hpp"
 #include "sig-net-parse.hpp"
 #include "sig-net.hpp"
 
@@ -80,6 +83,8 @@ struct AppState
 		std::array<uint8_t, 32> k0_key{};
 		std::array<uint8_t, 32> sender_key{};
 		std::array<uint8_t, 32> citizen_key{};
+		std::array<uint8_t, 32> manager_global_key{};
+		std::array<uint8_t, 32> manager_local_key{};
 		std::array<uint8_t, 512> dmx_buffer{};
 		std::array<uint8_t, 6> tuid{};
 
@@ -105,6 +110,15 @@ struct AppState
 		bool receiver_active = false;
 		bool auto_scroll_receive_log = true;
 
+		// Node simulator state
+		bool node_simulator_enabled = false;
+		bool node_simulator_respond_to_polls = true;
+		bool node_simulator_respond_to_gets = true;
+		bool node_simulator_respond_to_sets = true;
+		bool node_simulator_proactive_responses = true;
+		bool node_simulator_lost_mode = true;
+		bool in_lost_mode = false;
+
 		int passphrase_status = SigNet::SIGNET_PASSPHRASE_TOO_SHORT;
 		int endpoint = 1;
 		int universe = 1;
@@ -113,6 +127,7 @@ struct AppState
 		int announce_version_num = 3;
 		int selected_interface_index = 0;
 		int selected_discovered_node = -1;
+		int node_simulator_query_level = SigNet::QUERY_FULL;
 
 		uint32_t session_id = 1;
 		uint32_t sequence_num = 1;
@@ -126,6 +141,15 @@ struct AppState
 		uint32_t received_packet_count = 0;
 		uint32_t received_announce_count = 0;
 		uint32_t receive_error_count = 0;
+		uint32_t last_manager_poll_tick = 0;
+		uint32_t node_lost_timeout_ms = 30000;
+		uint32_t node_simulator_proactive_interval_ms = 1000;
+		uint32_t last_proactive_check_tick = 0;
+		uint32_t node_stats_poll_responses = 0;
+		uint32_t node_stats_get_responses = 0;
+		uint32_t node_stats_set_responses = 0;
+		uint32_t node_stats_replay_rejected = 0;
+		uint32_t node_stats_hmac_failures = 0;
 
 		uint8_t rgb_r = 255;
 		uint8_t rgb_g = 0;
@@ -139,6 +163,11 @@ struct AppState
 		std::vector<Network::InterfaceInfo> interfaces;
 		std::vector<DiscoveredNode> discovered_nodes;
 		std::string receiver_last_error;
+
+		// Node simulator data
+		SigNet::Node::NodeConfig node_config;
+		SigNet::NodeUserData node_user_data;
+		SigNet::Node::FreshnessTracker freshness_tracker;
 
 		enum DmxMode
 		{
@@ -226,6 +255,19 @@ std::string FormatAgeLabel(uint32_t last_seen_tick, uint32_t now_ticks);
 
 void ProcessReceivedDatagram(AppState &state, const Network::ReceivedDatagram &datagram);
 void UpdateReceiver(AppState &state);
+
+//==============================================================================
+// Node simulator
+//==============================================================================
+
+const char *QueryLevelLabel(int level);
+bool DeriveAllKeys(AppState &state);
+void InitializeNodeData(AppState &state);
+void SendProactiveResponses(AppState &state);
+void CheckLostMode(AppState &state);
+void SendNodeLostAnnounce(AppState &state);
+void Deprovision(AppState &state);
+void UpdateNodeSimulator(AppState &state, uint32_t current_tick);
 
 //==============================================================================
 // Initialization

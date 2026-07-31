@@ -805,6 +805,46 @@ void RenderReceiveTopRegion(App::AppState &state, float top_height)
 											ImGui::EndTabItem();
 										}
 
+									if (ImGui::BeginTabItem("Node Simulator"))
+										{
+											if (ImGui::BeginChild("##nodesim-scroll-rx", ImVec2(0.0f, -32.0f), true))
+												{
+													ImGui::Checkbox("Enable Simulator", &state.node_simulator_enabled);
+													ImGui::SliderInt("Query Level", &state.node_simulator_query_level, 0, SigNet::QUERY_FULL);
+													ImGui::SliderInt("Proactive (ms)", reinterpret_cast<int*>(&state.node_simulator_proactive_interval_ms), 0, 60000);
+													ImGui::Checkbox("Respond to Polls", &state.node_simulator_respond_to_polls);
+													ImGui::Checkbox("Respond to Gets", &state.node_simulator_respond_to_gets);
+													ImGui::Checkbox("Respond to Sets", &state.node_simulator_respond_to_sets);
+													ImGui::Checkbox("Proactive Responses", &state.node_simulator_proactive_responses);
+													ImGui::Separator();
+													ImGui::TextDisabled("K0 Configuration");
+													ImGui::InputScalar("K0 (hex)", ImGuiDataType_U8, state.k0_key.data(), NULL, NULL, "%02X", ImGuiInputTextFlags_CharsHexadecimal);
+													ImGui::InputScalar("TUID (hex)", ImGuiDataType_U8, state.tuid.data(), NULL, NULL, "%02X", ImGuiInputTextFlags_CharsHexadecimal);
+													ImGui::Separator();
+													ImGui::TextDisabled("Derived Keys");
+													ImGui::Text("Global: %.2x%.2x%.2x ... %.2x",
+														state.manager_global_key[0], state.manager_global_key[1], state.manager_global_key[2],
+														state.manager_global_key[SigNet::DERIVED_KEY_LENGTH - 1]);
+													ImGui::Text("Local:  %.2x%.2x%.2x ... %.2x",
+														state.manager_local_key[0], state.manager_local_key[1], state.manager_local_key[2],
+														state.manager_local_key[SigNet::DERIVED_KEY_LENGTH - 1]);
+													ImGui::Separator();
+													ImGui::TextDisabled("Simulator Stats");
+													ImGui::Text("Polls responded: %u", state.node_stats_poll_responses);
+													ImGui::Text("Gets responded: %u", state.node_stats_get_responses);
+													ImGui::Text("Sets accepted: %u", state.node_stats_set_responses);
+													ImGui::Text("Replays rejected: %u", state.node_stats_replay_rejected);
+													ImGui::Text("HMAC failures: %u", state.node_stats_hmac_failures);
+													ImGui::Separator();
+													ImGui::TextDisabled("Lost Mode");
+													ImGui::Checkbox("Activate Lost Mode", &state.node_simulator_lost_mode);
+													ImGui::SliderInt("Timeout (ms)", reinterpret_cast<int*>(&state.node_lost_timeout_ms), 0, 60000);
+													ImGui::Text("In Lost Mode: %s", state.in_lost_mode ? "YES" : "NO");
+												}
+											ImGui::EndChild();
+											ImGui::EndTabItem();
+										}
+
 									ImGui::EndTabBar();
 								}
 						}

@@ -69,6 +69,13 @@ void RenderTransmitBottomRegion(App::AppState &state, float bottom_height);
 void RenderReceiveTopRegion(App::AppState &state, float top_height);
 void RenderReceiveBottomRegion(App::AppState &state, float bottom_height);
 
+// Node simulator panel renderers
+void RenderNodeSimulatorPanel(App::AppState &state, float height);
+void RenderNodeSimulatorStats(App::AppState &state);
+void RenderNodeSimulatorControls(App::AppState &state);
+void RenderNodeSimulatorLostMode(App::AppState &state);
+void RenderNodeSimulatorFreshness(App::AppState &state);
+
 } // namespace UI
 
 #endif // SIG_NET_EXAMPLE_UI_HPP
