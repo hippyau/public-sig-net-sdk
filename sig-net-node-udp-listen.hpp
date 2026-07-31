@@ -5,11 +5,25 @@
 #ifndef SIGNET_NODE_UDP_LISTEN_HPP
 #define SIGNET_NODE_UDP_LISTEN_HPP
 
+#ifdef _WIN32
 #include <winsock2.h>
 #include <ws2tcpip.h>
+#else
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include <poll.h>
+#include <errno.h>
+typedef int SOCKET;
+#define INVALID_SOCKET (-1)
+#define SOCKET_ERROR (-1)
+#define WSAEWOULDBLOCK EWOULDBLOCK
+static inline int WSAGetLastError(void) { return errno; }
+#endif
 
 #include "sig-net.hpp"
 #include "sig-net-parse.hpp"
+#include "sig-net-tid-strings.hpp"
 
 namespace SigNet {
 namespace Node {
@@ -41,7 +55,7 @@ inline int32_t PollUdpSocket(SOCKET udp_socket,
 
     while (packet_budget-- > 0) {
         sockaddr_in source_addr;
-        int source_len = sizeof(source_addr);
+        socklen_t source_len = sizeof(source_addr);
         int bytes_read = recvfrom(udp_socket,
                                   (char*)rx_buffer,
                                   max_payload,
